@@ -72,7 +72,8 @@ jobs:
           upload() {
             local path="$1" status attempt
             for attempt in 1 2 3; do
-              status=$(curl -sS -o /tmp/upload.json -w "%{http_code}" --max-time 60 \
+              # -L: the app's domain may redirect (307 keeps the POST and its body).
+              status=$(curl -sSL --max-redirs 3 -o /tmp/upload.json -w "%{http_code}" --max-time 60 \
                 -X POST "${APP_URL}/api/internal/europe-xc/upload?path=${path}" \
                 -H "x-internal-cron-secret: ${INTERNAL_CRON_SECRET}" \
                 -H "Content-Type: application/octet-stream" \
