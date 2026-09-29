@@ -93,11 +93,13 @@ def fake_run(root):
         write(root, 'HBAS_CON', f'{single}_HBAS_CON.grib2.bz2', field(2))
         write(root, 'CAPE_ML', f'{single}_CAPE_ML.grib2.bz2', field(3))
         write(root, 'CLCT', f'{single}_CLCT.grib2.bz2', field(4))
-        # Totals grow by the scenario's 3-hour rain every third step.
-        write(root, 'TOT_PREC', f'{single}_TOT_PREC.grib2.bz2', field(5) * (step // build.RAIN_HOURS))
         pressure = f'icon-eu_europe_regular-lat-lon_pressure-level_{RUN}_{step:03d}_700'
         write(root, 'U', f'{pressure}_U.grib2.bz2', field(6))
         write(root, 'V', f'{pressure}_V.grib2.bz2', field(7))
+    # Totals grow steadily at the scenario's rain; hourly to +78 h, then every third hour, as DWD writes them.
+    for step in list(range(1, build.HOURLY_UNTIL_STEP + 1)) + list(range(81, build.LAST_STEP + 1, 3)):
+        single = f'icon-eu_europe_regular-lat-lon_single-level_{RUN}_{step:03d}'
+        write(root, 'TOT_PREC', f'{single}_TOT_PREC.grib2.bz2', field(5) / build.RAIN_HOURS * step)
 
 
 class BuildTest(unittest.TestCase):
@@ -144,6 +146,27 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(row[5][3], 0, 'sea is transparent')
         self.assertEqual(px[0][0][3], 0, 'north-up: the first row is the sea row')
         self.assertEqual(px[1][0][3], 255)
+
+    def test_rain(self):
+        rain = self.manifest['rain']
+        self.assertEqual((rain['width'], rain['height']), (NI, NJ))
+        self.assertEqual(rain['bounds'], [-5.5, 39.5, 6.5, 45.5])
+        times = [f['time'] for f in rain['frames']]
+        # 05..18 UTC hourly to +78 h (day 3 06 UTC), then 06, 09, 12, 15, 18 UTC.
+        self.assertEqual(times[:2], ['2026-06-21T05:00:00Z', '2026-06-21T06:00:00Z'])
+        self.assertIn('2026-06-24T06:00:00Z', times)
+        self.assertNotIn('2026-06-24T07:00:00Z', times)
+        self.assertIn('2026-06-24T09:00:00Z', times)
+        self.assertEqual(times[-1], '2026-06-25T18:00:00Z')
+        spans = {f['time']: f['hours'] for f in rain['frames']}
+        self.assertEqual((spans['2026-06-24T06:00:00Z'], spans['2026-06-24T09:00:00Z']), (1, 3))
+        for frame in (rain['frames'][0], rain['frames'][-1]):
+            px = np.asarray(Image.open(os.path.join(self.out, frame['file'])))
+            self.assertEqual(px.shape, (NJ, NI))
+            # Scenario 3 rains 1.5 mm in 3 hours: 0.5 mm/h is 2 + 25 x log2(5) = 60. The rest is dry.
+            self.assertEqual(px[3][4:6].tolist(), [60, 60], frame['file'])
+            self.assertEqual(px[3][0], 1)
+        self.assertEqual(build.encode_rain(np.array([np.nan, 0.0, 0.05, 0.1, 1000.0])).tolist(), [0, 1, 1, 2, 255])
 
     def test_latest_run(self):
         self.assertEqual(build.latest_run(dt.datetime(2026, 6, 21, 3, 0, tzinfo=dt.timezone.utc)), '2026062012')

@@ -7,7 +7,8 @@ name: Europe XC Outlook
 #
 # 04:40 UTC takes the 00 UTC run, 16:40 UTC the 12 UTC run; DWD finishes
 # writing each about 3.5 h after its start time. One run downloads about
-# 120 bz2 GRIB files and uploads 15 small PNGs and latest.json.
+# 200 bz2 GRIB files and uploads 15 small PNGs, about 70 hourly rain
+# frames for the map's time rail, and latest.json.
 #
 # Prerequisites (GitHub → Settings → Secrets and variables → Actions):
 #   APP_URL:              e.g. https://parameteo.app

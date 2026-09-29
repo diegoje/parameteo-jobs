@@ -17,6 +17,13 @@ Each pixel is the mean of 2 x 2 model points (about 14 km), encoded as:
      speed in 4 km/h steps (15 = 60 km/h or more)
   A  255 over land, 0 over sea and outside the model
 
+Beside them go hourly rain frames for the map's time rail, one grey PNG
+per hour from 05 to 18 UTC (07 to 19 in Zurich, summer or winter) at the
+model's full 0.0625 degree grid, one byte per point as the app's radar:
+  0 outside the model, 1 dry, 2..255 = 0.1 x 2^((byte - 2) / 25) mm/h
+over the hour up to the frame. After +78 h ICON-EU only writes every third
+hour, so those frames hold the mean of the three hours up to them.
+
 Usage:
   build.py --out DIR [--run YYYYMMDDHH] [--source URL_OR_DIR]
 
@@ -54,6 +61,12 @@ SINGLE = ['HTOP_DC', 'HBAS_CON', 'CAPE_ML', 'CLCT', 'TOT_PREC']
 RAIN_MM_PER_H = 0.3
 STORM_CAPE = 1200.0
 DECIMATE = 2
+# Rain for the rail: every hour it can show, 07-19 in Zurich in summer or winter.
+RAIN_FRAME_HOURS_UTC = range(5, 19)
+HOURLY_UNTIL_STEP = 78
+LAST_STEP = 120
+RAIN_FLOOR_MM_PER_H = 0.1
+RAIN_STEPS_PER_DOUBLING = 25
 
 
 # ---------------------------------------------------------------- scoring --
@@ -102,6 +115,17 @@ def encode_frame(score40, ceiling, rain, storm, cumulus, u, v, land):
     b = (sector * 16 + speed).astype(np.uint8)
     a = np.where(land, 255, 0).astype(np.uint8)
     return np.dstack([r, g, b, a])
+
+
+def encode_rain(rate):
+    """Rain rate in mm/h to bytes, as the app's radar frames: 0 outside the model, 1 dry, 2..255 wet."""
+    out = np.ones(rate.shape, dtype=np.uint8)
+    finite = np.isfinite(rate)
+    wet = finite & (rate >= RAIN_FLOOR_MM_PER_H)
+    steps = np.round(RAIN_STEPS_PER_DOUBLING * np.log2(np.where(wet, rate, RAIN_FLOOR_MM_PER_H) / RAIN_FLOOR_MM_PER_H))
+    out[wet] = np.clip(2 + steps[wet], 2, 255).astype(np.uint8)
+    out[~finite] = 0
+    return out
 
 
 # ------------------------------------------------------------------- GRIB --
@@ -191,6 +215,43 @@ def latest_run(now):
     return ready.strftime('%Y%m%d') + ('12' if ready.hour >= 12 else '00')
 
 
+def build_rain(source, out_dir, run_time, grid):
+    """Hourly rain frames for the rail. Returns their manifest entries."""
+    frames = []
+    totals = {}
+
+    def total(step):
+        # Totals only, not source.single's cache: this reads about 80 steps of the full grid.
+        if step not in totals:
+            if step == 0:
+                field, g = source._single('TOT_PREC', 1)
+                totals[0] = np.zeros_like(field)
+            else:
+                field, g = source._single('TOT_PREC', step)
+                if g.key() != grid.key():
+                    raise SystemExit(f'TOT_PREC at +{step} h is on another grid')
+                totals[step] = field
+        return totals[step]
+
+    for day in range(DAYS + 1):
+        for hour in RAIN_FRAME_HOURS_UTC:
+            valid = run_time.replace(hour=0) + dt.timedelta(days=day, hours=hour)
+            step = int((valid - run_time).total_seconds() // 3600)
+            if step < 1 or step > LAST_STEP:
+                continue
+            span = 1 if step <= HOURLY_UNTIL_STEP else 3
+            if step % span:
+                continue
+            rate = np.clip(total(step) - total(step - span), 0, None) / span
+            for old in [k for k in totals if k < step - 3]:
+                del totals[old]
+            name = f'{source.run}/{valid.strftime("%Y%m%dT%H")}-rain.png'
+            Image.fromarray(encode_rain(rate), 'L').save(os.path.join(out_dir, name), optimize=True)
+            frames.append({'time': valid.strftime('%Y-%m-%dT%H:00:00Z'), 'file': name, 'hours': span})
+            print(f'{name}: wettest {round(float(np.nanmax(rate)), 1)} mm/h', flush=True)
+    return frames
+
+
 def build(source, out_dir, now):
     run_time = dt.datetime.strptime(source.run, '%Y%m%d%H').replace(tzinfo=dt.timezone.utc)
     hsurf, grid = source.invariant('HSURF')
@@ -242,6 +303,7 @@ def build(source, out_dir, now):
 
     if not frames:
         raise SystemExit(f'run {source.run} has no frames')
+    rain_frames = build_rain(source, out_dir, run_time, grid)
     height, width = rgba.shape[:2]
     lat_step = (grid.lat_north - grid.lat_south) / (grid.nj - 1)
     lon_step = (grid.lon_east - grid.lon_west) / (grid.ni - 1)
@@ -267,6 +329,19 @@ def build(source, out_dir, now):
             'land': 'A = 255',
         },
         'frames': frames,
+        # Rain for the rail, on the model's own grid.
+        'rain': {
+            'bounds': [
+                round(west, 5),
+                round(north - lat_step * grid.nj, 5),
+                round(west + lon_step * grid.ni, 5),
+                round(north, 5),
+            ],
+            'width': grid.ni,
+            'height': grid.nj,
+            'encoding': '0 outside the model, 1 dry, else 0.1 * 2^((byte - 2) / 25) mm/h over the hours up to the frame',
+            'frames': rain_frames,
+        },
         'attribution': 'Deutscher Wetterdienst (DWD), ICON-EU, CC BY 4.0',
     }
     with open(os.path.join(out_dir, 'latest.json'), 'w') as handle:
