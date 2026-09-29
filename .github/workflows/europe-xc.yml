@@ -1,0 +1,97 @@
+name: Europe XC Outlook
+
+# Builds the map's XC outlook for all of Europe from DWD's ICON-EU open
+# data (opendata.dwd.de, free, CC BY 4.0 with attribution) and stores it
+# in the public `europe-xc` Supabase bucket through the app. No Open-Meteo
+# units: the whole continent costs two GitHub runs a day.
+#
+# 04:40 UTC takes the 00 UTC run, 16:40 UTC the 12 UTC run; DWD finishes
+# writing each about 3.5 h after its start time. One run downloads about
+# 120 bz2 GRIB files and uploads 15 small PNGs and latest.json.
+#
+# Prerequisites (GitHub → Settings → Secrets and variables → Actions):
+#   APP_URL:              e.g. https://parameteo.app
+#   INTERNAL_CRON_SECRET: must match the value in your Vercel env vars
+# and the bucket from supabase/migrations/033_europe_xc_bucket.sql.
+
+on:
+  schedule:
+    - cron: '40 4 * * *'
+    - cron: '40 16 * * *'
+  workflow_dispatch:
+    inputs:
+      run:
+        description: 'ICON-EU run as YYYYMMDDHH, 00 or 12 (blank = the latest)'
+        required: false
+        type: string
+
+jobs:
+  build:
+    name: Score ICON-EU and upload
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: europe-xc/requirements.txt
+
+      - name: Install
+        run: pip install -r europe-xc/requirements.txt
+
+      - name: Test the builder
+        run: python europe-xc/test_build.py
+
+      - name: Build from DWD
+        # Pass the input through env (never interpolate ${{ }} into the shell body).
+        env:
+          RUN: ${{ inputs.run }}
+        run: |
+          set -euo pipefail
+          if [ -n "${RUN:-}" ]; then
+            if ! [[ "$RUN" =~ ^[0-9]{8}(00|12)$ ]]; then
+              echo "run must be YYYYMMDD00 or YYYYMMDD12"
+              exit 1
+            fi
+            python europe-xc/build.py --out out --run "$RUN"
+          else
+            python europe-xc/build.py --out out
+          fi
+          du -sh out
+
+      - name: Upload frames, then the manifest
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          INTERNAL_CRON_SECRET: ${{ secrets.INTERNAL_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          upload() {
+            local path="$1" status attempt
+            for attempt in 1 2 3; do
+              status=$(curl -sS -o /tmp/upload.json -w "%{http_code}" --max-time 60 \
+                -X POST "${APP_URL}/api/internal/europe-xc/upload?path=${path}" \
+                -H "x-internal-cron-secret: ${INTERNAL_CRON_SECRET}" \
+                -H "Content-Type: application/octet-stream" \
+                --data-binary "@out/${path}" || echo 000)
+              if [ "$status" -ge 200 ] && [ "$status" -lt 300 ]; then
+                echo "$path: $(cat /tmp/upload.json)"
+                return 0
+              fi
+              echo "$path: HTTP $status, attempt $attempt"
+              cat /tmp/upload.json 2>/dev/null || true
+              sleep $((attempt * 10))
+            done
+            return 1
+          }
+          cd out
+          frames=$(ls -1 */*.png)
+          cd ..
+          for frame in $frames; do
+            upload "$frame"
+          done
+          # Last, so the map never reads a manifest whose frames aren't there yet.
+          upload latest.json

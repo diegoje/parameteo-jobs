@@ -1,0 +1,98 @@
+name: Site Forecast Morning Pass
+
+# Scores every catalogued site once each morning so the map and the Today
+# list have a colour for every launch before anyone opens one. The server
+# plans the run inside a fixed share of the Open-Meteo budget (45% of the
+# daily limit, never above the 80% line kept for sites with no forecast),
+# shares one pressure-level fetch per 0.25° cell, and skips sites fetched
+# in the last 3 hours. Pages still refresh on demand when the data ages.
+#
+# Prerequisites (GitHub → Settings → Secrets and variables → Actions):
+#   APP_URL:              e.g. https://parameteo.app
+#   INTERNAL_CRON_SECRET: must match the value in your Vercel env vars
+
+on:
+  schedule:
+    # 04:10 UTC: after the region outlook (03:30) and the night's model
+    # runs, before pilots in Europe/Zurich start checking.
+    - cron: '10 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    name: Score sites for the morning
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Plan and run batches
+        shell: bash
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          INTERNAL_CRON_SECRET: ${{ secrets.INTERNAL_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+
+          START_STATUS=$(curl -sSL -o /tmp/pass-start.json -w "%{http_code}" \
+            --max-time 60 \
+            -X POST "${APP_URL}/api/internal/site-forecast/start" \
+            -H "x-internal-cron-secret: ${INTERNAL_CRON_SECRET}" \
+            -H "Content-Type: application/json")
+          echo "Start HTTP status: $START_STATUS"
+          jq 'del(.batches)' /tmp/pass-start.json
+          if [ "$START_STATUS" -lt 200 ] || [ "$START_STATUS" -ge 300 ]; then
+            echo "Planning failed with HTTP $START_STATUS"
+            exit 1
+          fi
+
+          BATCH_COUNT=$(jq -r '.batches | length' /tmp/pass-start.json)
+          DELAY_SECONDS=$(jq -r '.delaySeconds' /tmp/pass-start.json)
+          echo "Running $BATCH_COUNT batches"
+
+          # Batches are idempotent (a re-run rewrites the same rows), so a
+          # retry after a transient error is safe.
+          MAX_BATCH_ATTEMPTS=3
+          RETRY_BACKOFF_SECONDS=15
+          FAILED=0
+
+          for ((BATCH_INDEX=0; BATCH_INDEX<BATCH_COUNT; BATCH_INDEX++)); do
+            jq -c "{slugs: .batches[${BATCH_INDEX}]}" /tmp/pass-start.json > /tmp/pass-body.json
+            ATTEMPT=1
+            BATCH_OK=0
+            while [ "$ATTEMPT" -le "$MAX_BATCH_ATTEMPTS" ]; do
+              STATUS=$(curl -sSL -o "/tmp/pass-batch-${BATCH_INDEX}.json" -w "%{http_code}" \
+                --max-time 300 \
+                -X POST "${APP_URL}/api/internal/site-forecast/batch" \
+                -H "x-internal-cron-secret: ${INTERNAL_CRON_SECRET}" \
+                -H "Content-Type: application/json" \
+                --data @/tmp/pass-body.json \
+                || echo "000")
+              echo "Batch ${BATCH_INDEX}/${BATCH_COUNT} attempt ${ATTEMPT} HTTP status: $STATUS"
+              cat "/tmp/pass-batch-${BATCH_INDEX}.json"; echo
+              if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 300 ]; then
+                BATCH_OK=1
+                break
+              fi
+              if [ "$ATTEMPT" -lt "$MAX_BATCH_ATTEMPTS" ]; then
+                sleep $((RETRY_BACKOFF_SECONDS * ATTEMPT))
+              fi
+              ATTEMPT=$((ATTEMPT + 1))
+            done
+
+            if [ "$BATCH_OK" -ne 1 ]; then
+              echo "Batch ${BATCH_INDEX} failed; its sites stay on the on-demand path"
+              FAILED=1
+            elif [ "$(jq -r '.stop // false' "/tmp/pass-batch-${BATCH_INDEX}.json")" = "true" ]; then
+              echo "The Open-Meteo budget said stop; ending the pass here"
+              break
+            fi
+
+            if [ "$BATCH_INDEX" -lt "$((BATCH_COUNT - 1))" ]; then
+              sleep "$DELAY_SECONDS"
+            fi
+          done
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "One or more batches failed"
+            exit 1
+          fi
