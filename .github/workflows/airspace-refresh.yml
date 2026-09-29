@@ -1,0 +1,63 @@
+name: XContest Airspace Refresh
+
+# Daily import of free-flight airspace + the day's activations from XContest
+# (airspace.xcontest.org), already filtered for the paraglider category. The
+# zones change rarely but the activations are date-specific, so this must run
+# once per day for the XC-planning "is it hot today?" overlay to stay correct.
+#
+# Cadence: once daily at 04:20 UTC — early enough that today's MIL ON / R-zone
+# windows are loaded before pilots plan their morning flights (CH sunrise is
+# ~03:30-05:30 UTC across the year). Upserts are keyed on (source, source_ref)
+# and (zone_ref, date, source), so a re-run is idempotent.
+#
+# Costs: one ~10-20s request/day, in a public repository, so no Actions minutes.
+#
+# Prerequisites (Settings → Secrets and variables → Actions):
+#   APP_URL                — e.g. https://parameteo.app
+#   INTERNAL_CRON_SECRET   — must match the Vercel env var
+#
+# Imports Switzerland (XContest country id 7) and France (id 9).
+#
+# Verify with workflow_dispatch before relying on the schedule.
+
+on:
+  schedule:
+    - cron: '20 4 * * *'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Day to import, unpadded YYYY-M-D (blank = today, Europe/Zurich)'
+        required: false
+        type: string
+
+jobs:
+  refresh:
+    name: Import XContest airspace + activations
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Trigger airspace refresh endpoint
+        # Pass inputs/secrets through env (never interpolate ${{ }} into the
+        # shell body) to avoid script injection from workflow_dispatch input.
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          INTERNAL_CRON_SECRET: ${{ secrets.INTERNAL_CRON_SECRET }}
+          IMPORT_DATE: ${{ inputs.date }}
+        run: |
+          BODY='{"countries":["CH","FR"]}'
+          if [ -n "$IMPORT_DATE" ]; then
+            BODY=$(printf '{"countries":["CH","FR"],"date":"%s"}' "$IMPORT_DATE")
+          fi
+          STATUS=$(curl -sSL -o /tmp/airspace-response.json -w "%{http_code}" \
+            -X POST "${APP_URL}/api/admin/xcontest-refresh" \
+            -H "x-internal-cron-secret: ${INTERNAL_CRON_SECRET}" \
+            -H "Content-Type: application/json" \
+            -d "$BODY")
+          echo "HTTP status: $STATUS"
+          cat /tmp/airspace-response.json || true
+          echo
+          if [ "$STATUS" -lt 200 ] || [ "$STATUS" -ge 300 ]; then
+            echo "XContest airspace refresh failed with HTTP $STATUS"
+            exit 1
+          fi

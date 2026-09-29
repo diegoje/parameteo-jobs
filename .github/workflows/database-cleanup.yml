@@ -1,0 +1,63 @@
+name: Database Cleanup
+
+# Nightly DB maintenance to remove stale stored forecast rows and old AI analyses.
+# Without it, site_daily_analyses keeps every past day's forecasts, and the
+# database's reads and vacuums grow with them.
+#
+# Uses the same internal secret pattern as the other maintenance jobs, so no
+# additional backend auth surface is needed.
+#
+# Prerequisites (GitHub → Settings → Secrets and variables → Actions):
+#   APP_URL
+#   INTERNAL_CRON_SECRET
+
+on:
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+    inputs:
+      ai_retention_days:
+        description: 'Keep AI analyses for this many days'
+        required: false
+        default: '30'
+        type: string
+      daily_analysis_retention_days:
+        description: 'Keep site_daily_analyses rows for this many days'
+        required: false
+        default: '7'
+        type: string
+      clear_weather_cache:
+        description: 'Clear in-memory cache after cleanup'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  cleanup:
+    name: Cleanup stored forecast data
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Trigger cleanup endpoint
+        shell: bash
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          INTERNAL_CRON_SECRET: ${{ secrets.INTERNAL_CRON_SECRET }}
+          AI_RETENTION_DAYS: ${{ github.event.inputs.ai_retention_days || '30' }}
+          DAILY_ANALYSIS_RETENTION_DAYS: ${{ github.event.inputs.daily_analysis_retention_days || '7' }}
+          CLEAR_WEATHER_CACHE: ${{ github.event.inputs.clear_weather_cache || 'true' }}
+        run: |
+          STATUS=$(curl -sSL -o /tmp/cleanup-response.json -w "%{http_code}" \
+            -X POST "${APP_URL}/api/internal/cleanup" \
+            -H "x-internal-cron-secret: ${INTERNAL_CRON_SECRET}" \
+            -H "Content-Type: application/json" \
+            --data "{\"aiRetentionDays\": ${AI_RETENTION_DAYS}, \"dailyAnalysisRetentionDays\": ${DAILY_ANALYSIS_RETENTION_DAYS}, \"clearWeatherCache\": ${CLEAR_WEATHER_CACHE}}")
+
+          echo "HTTP status: $STATUS"
+          cat /tmp/cleanup-response.json || true
+
+          if [ "$STATUS" -lt 200 ] || [ "$STATUS" -ge 300 ]; then
+            echo "Cleanup failed with HTTP $STATUS"
+            exit 1
+          fi

@@ -1,6 +1,6 @@
 # ParaMeteo scheduled jobs
 
-The two scheduled jobs behind [ParaMeteo](https://parameteo.app), kept in a
+The scheduled jobs behind [ParaMeteo](https://parameteo.app), kept in a
 public repository because GitHub Actions minutes are free here. The app
 itself lives in a private repository; nothing in this one is secret.
 
@@ -8,8 +8,10 @@ itself lives in a private repository; nothing in this one is secret.
 | --- | --- | --- |
 | `europe-xc.yml` | 04:40 and 16:40 | Downloads DWD's ICON-EU run from opendata.dwd.de, scores every 7 km cell for cross-country flying (`europe-xc/build.py`) and uploads 15 small PNG frames, about 70 hourly rain frames for the map's time rail, then `latest.json`, to the app. |
 | `site-forecast.yml` | 04:10 | Asks the app to score every listed launch for the morning, in batches, inside a fixed share of the Open-Meteo budget. |
+| `database-cleanup.yml` | 02:23 | Asks the app to delete stored forecasts older than 7 days and AI analyses older than 30. |
+| `airspace-refresh.yml` | 04:20 | Asks the app to import XContest's free-flight airspace and the day's activations for Switzerland and France. |
 
-Both call the app's internal endpoints with a shared secret. Set these
+All of them call the app's internal endpoints with a shared secret. Set these
 under Settings → Secrets and variables → Actions:
 
 - `APP_URL`: the app's address, e.g. `https://parameteo.app`
