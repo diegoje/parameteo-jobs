@@ -52,7 +52,9 @@ jobs:
           # Batches are idempotent (a re-run rewrites the same rows), so a
           # retry after a transient error is safe.
           MAX_BATCH_ATTEMPTS=3
-          RETRY_BACKOFF_SECONDS=15
+          # Open-Meteo throttles by the minute (timeouts, then 429s), so a retry
+          # waits a full minute, then two, to start in a fresh window.
+          RETRY_BACKOFF_SECONDS=60
           FAILED=0
 
           for ((BATCH_INDEX=0; BATCH_INDEX<BATCH_COUNT; BATCH_INDEX++)); do
