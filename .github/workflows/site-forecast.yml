@@ -5,7 +5,13 @@ name: Site Forecast Morning Pass
 # plans the run inside a fixed share of the Open-Meteo budget (45% of the
 # daily limit, never above the 80% line kept for sites with no forecast),
 # shares one pressure-level fetch per 0.25° cell, and skips sites fetched
-# in the last 3 hours. Pages still refresh on demand when the data ages.
+# in the last 20 hours. Pages still refresh on demand when the data ages.
+#
+# Since November 2026 this is the backup. The home machine starts the pass at
+# 04:10 UTC (paragliding: docs/home-jobs.md), because GitHub ran this schedule
+# about 8 hours late. skipFetchedWithinHours makes this run score only the
+# sites that one missed: nothing on a normal day, everything when the machine
+# was off.
 #
 # Prerequisites (GitHub → Settings → Secrets and variables → Actions):
 #   APP_URL:              e.g. https://parameteo.app
@@ -37,7 +43,8 @@ jobs:
             --max-time 60 \
             -X POST "${APP_URL}/api/internal/site-forecast/start" \
             -H "x-internal-cron-secret: ${INTERNAL_CRON_SECRET}" \
-            -H "Content-Type: application/json")
+            -H "Content-Type: application/json" \
+            --data '{"skipFetchedWithinHours": 20}')
           echo "Start HTTP status: $START_STATUS"
           jq 'del(.batches)' /tmp/pass-start.json
           if [ "$START_STATUS" -lt 200 ] || [ "$START_STATUS" -ge 300 ]; then
