@@ -4,6 +4,10 @@ name: Database Cleanup
 # Without it, site_daily_analyses keeps every past day's forecasts, and the
 # database's reads and vacuums grow with them.
 #
+# Stored days are kept for one past day: nothing reads them once past, and what
+# the forecast said is kept in forecast_archive. The home machine runs the same
+# cleanup earlier in the night (paragliding: docs/home-jobs.md); this is the backup.
+#
 # Uses the same internal secret pattern as the other maintenance jobs, so no
 # additional backend auth surface is needed.
 #
@@ -24,7 +28,7 @@ on:
       daily_analysis_retention_days:
         description: 'Keep site_daily_analyses rows for this many days'
         required: false
-        default: '7'
+        default: '1'
         type: string
       clear_weather_cache:
         description: 'Clear in-memory cache after cleanup'
@@ -45,7 +49,7 @@ jobs:
           APP_URL: ${{ secrets.APP_URL }}
           INTERNAL_CRON_SECRET: ${{ secrets.INTERNAL_CRON_SECRET }}
           AI_RETENTION_DAYS: ${{ github.event.inputs.ai_retention_days || '30' }}
-          DAILY_ANALYSIS_RETENTION_DAYS: ${{ github.event.inputs.daily_analysis_retention_days || '7' }}
+          DAILY_ANALYSIS_RETENTION_DAYS: ${{ github.event.inputs.daily_analysis_retention_days || '1' }}
           CLEAR_WEATHER_CACHE: ${{ github.event.inputs.clear_weather_cache || 'true' }}
         run: |
           STATUS=$(curl -sSL -o /tmp/cleanup-response.json -w "%{http_code}" \
